@@ -3,18 +3,99 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import copaw.providers.anthropic_provider as anthropic_provider_module
-from copaw.providers.anthropic_provider import AnthropicProvider
+import qwenpaw.providers.anthropic_provider as anthropic_provider_module
+from qwenpaw.providers.anthropic_provider import AnthropicProvider
 
 
-def _make_provider() -> AnthropicProvider:
+def _make_provider(is_custom: bool = False) -> AnthropicProvider:
     return AnthropicProvider(
         id="anthropic",
         name="Anthropic",
         base_url="https://mock-anthropic.local",
         api_key="ant-test",
         chat_model="AnthropicChatModel",
+        is_custom=is_custom,
     )
+
+
+def test_get_chat_model_instance_uses_configured_max_tokens(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAnthropicChatModel:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "agentscope.model.AnthropicChatModel",
+        FakeAnthropicChatModel,
+    )
+
+    provider = _make_provider()
+    provider.generate_kwargs = {
+        "max_tokens": 4096,
+        "temperature": 0.2,
+    }
+
+    provider.get_chat_model_instance("claude-3-5-sonnet")
+
+    assert captured["model_name"] == "claude-3-5-sonnet"
+    assert captured["max_tokens"] == 4096
+
+
+def test_get_chat_model_instance_uses_default_max_tokens_when_unset(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAnthropicChatModel:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "agentscope.model.AnthropicChatModel",
+        FakeAnthropicChatModel,
+    )
+
+    provider = _make_provider()
+
+    provider.get_chat_model_instance("claude-3-5-sonnet")
+
+    assert captured["model_name"] == "claude-3-5-sonnet"
+    assert captured["max_tokens"] == 16384
+
+
+def test_get_chat_model_instance_does_not_mutate_generate_kwargs(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    class FakeAnthropicChatModel:
+        def __init__(self, **kwargs) -> None:
+            captured.append(kwargs)
+
+    monkeypatch.setattr(
+        "agentscope.model.AnthropicChatModel",
+        FakeAnthropicChatModel,
+    )
+
+    provider = _make_provider()
+    provider.generate_kwargs = {
+        "max_tokens": 32768,
+        "temperature": 0.2,
+    }
+
+    provider.get_chat_model_instance("claude-3-5-sonnet")
+    provider.get_chat_model_instance("claude-3-5-sonnet")
+
+    assert [call["max_tokens"] for call in captured] == [32768, 32768]
+    assert provider.generate_kwargs == {
+        "max_tokens": 32768,
+        "temperature": 0.2,
+    }
+    assert captured[0]["generate_kwargs"] == {"temperature": 0.2}
+    assert captured[1]["generate_kwargs"] == {"temperature": 0.2}
 
 
 async def test_check_connection_success(monkeypatch) -> None:
@@ -54,7 +135,7 @@ async def test_check_connection_api_error_returns_false(monkeypatch) -> None:
     ok, msg = await provider.check_connection(timeout=1.0)
 
     assert ok is False
-    assert msg == "Anthropic API error"
+    assert msg == "Anthropic API error: boom"
 
 
 async def test_list_model_normalizes_and_deduplicates(monkeypatch) -> None:
@@ -83,7 +164,7 @@ async def test_list_model_normalizes_and_deduplicates(monkeypatch) -> None:
         "Claude Haiku",
         "claude-3-5-sonnet",
     ]
-    assert provider.models == []
+    assert not provider.models
 
 
 async def test_check_model_connection_success(monkeypatch) -> None:
@@ -115,7 +196,9 @@ async def test_check_model_connection_success(monkeypatch) -> None:
     assert len(captured) == 1
     assert captured[0]["model"] == "claude-3-5-haiku"
     assert captured[0]["max_tokens"] == 1
-    assert captured[0]["messages"] == [{"role": "user", "content": "ping"}]
+    assert captured[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "ping"}]},
+    ]
     assert captured[0]["stream"] is True
 
 
@@ -156,13 +239,13 @@ async def test_check_model_connection_api_error_returns_false(
 
 
 async def test_update_config_updates_only_non_none_values() -> None:
-    provider = _make_provider()
+    provider = _make_provider(is_custom=True)
 
     provider.update_config(
         {
             "name": "Anthropic Custom",
             "base_url": "https://new.example",
-            "api_key": "ant-new",
+            "api_key": "sk-ant-new",
             "chat_model": "AnthropicChatModel",
             "api_key_prefix": "sk-ant-",
         },
@@ -170,6 +253,16 @@ async def test_update_config_updates_only_non_none_values() -> None:
 
     assert provider.name == "Anthropic Custom"
     assert provider.base_url == "https://new.example"
-    assert provider.api_key == "ant-new"
+    assert provider.api_key == "sk-ant-new"
     assert provider.chat_model == "AnthropicChatModel"
     assert provider.api_key_prefix == "sk-ant-"
+
+    provider_info = await provider.get_info()
+
+    assert provider_info.name == "Anthropic Custom"
+    assert provider_info.base_url == "https://new.example"
+    assert provider_info.api_key == "sk-ant-******"
+    assert provider_info.chat_model == "AnthropicChatModel"
+    assert provider_info.api_key_prefix == "sk-ant-"
+    assert provider_info.is_custom
+    assert not provider_info.support_connection_check
